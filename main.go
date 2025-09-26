@@ -24,18 +24,23 @@ type Incident struct {
 	Timestamp    string  `json:"timestamp"`
 }
 
-// Structs for creating a rich Discord Embed
+// Structs for creating a rich Discord Embed, now with Thumbnail support
 type DiscordWebhookPayload struct {
 	Username string         `json:"username"`
 	Embeds   []DiscordEmbed `json:"embeds"`
 }
 
 type DiscordEmbed struct {
-	Title     string       `json:"title"`
-	Color     int          `json:"color"`
-	Fields    []EmbedField `json:"fields"`
-	Footer    EmbedFooter  `json:"footer"`
-	Timestamp string       `json:"timestamp"`
+	Title     string         `json:"title"`
+	Color     int            `json:"color"`
+	Fields    []EmbedField   `json:"fields"`
+	Footer    EmbedFooter    `json:"footer"`
+	Timestamp string         `json:"timestamp"`
+	Thumbnail EmbedThumbnail `json:"thumbnail,omitempty"`
+}
+
+type EmbedThumbnail struct {
+	URL string `json:"url"`
 }
 
 type EmbedField struct {
@@ -74,22 +79,39 @@ func saveSentIncidents(filename string, sentIDs map[string]bool) error {
 }
 
 // sendToDiscord sends a rich embed for a new MVC incident.
-func sendToDiscord(webhookURL string, incident Incident, parsedTime time.Time) {
-	mapLink := fmt.Sprintf("[View on Google Maps](https://www.google.com/maps?q=%.6f,%.6f&z=12)", incident.Lat, incident.Long)
+func sendToDiscord(webhookURL string, incident Incident, parsedTime time.Time, mapsAPIKey string) {
+	// Determine embed color based on the problem description.
+	var color int
+	problemLower := strings.ToLower(incident.Problem)
+	if strings.Contains(problemLower, "injur") {
+		color = 15158332 // Red for injuries
+	} else if strings.Contains(problemLower, "damage") || strings.Contains(problemLower, "hit & run") {
+		color = 15844367 // Yellow for damage/hit & run
+	} else {
+		color = 3447003 // Default blue for everything else
+	}
 
+	// All fields are now single-column for mobile readability.
 	fields := []EmbedField{
-		{Name: "Problem", Value: incident.Problem, Inline: false},
-		{Name: "Address", Value: incident.Address, Inline: true},
-		{Name: "Jurisdiction", Value: incident.Jurisdiction, Inline: true},
-		{Name: "Map", Value: mapLink, Inline: false},
+		{Name: "Address", Value: incident.Address, Inline: false},
+		{Name: "Jurisdiction", Value: incident.Jurisdiction, Inline: false},
 	}
 
 	embed := DiscordEmbed{
-		Title:     "🔵 RWECC - New MVC Alert 🔵",
-		Color:     3447003, // A nice blue color
+		Title:     incident.Problem,
+		Color:     color,
 		Fields:    fields,
 		Footer:    EmbedFooter{Text: "Fetched from Raleigh-Wake ECC"},
 		Timestamp: parsedTime.Format(time.RFC3339),
+	}
+
+	// Generate and add the static map thumbnail if an API key is provided.
+	if mapsAPIKey != "" {
+		mapURL := fmt.Sprintf(
+			"https://maps.googleapis.com/maps/api/staticmap?center=%.6f,%.6f&zoom=14&size=300x300&markers=color:red%%7C%.6f,%.6f&key=%s",
+			incident.Lat, incident.Long, incident.Lat, incident.Long, mapsAPIKey,
+		)
+		embed.Thumbnail = EmbedThumbnail{URL: mapURL}
 	}
 
 	payload := DiscordWebhookPayload{
@@ -122,6 +144,7 @@ func main() {
 
 	apiURL := os.Getenv("RWECC_URL")
 	webhookURL := os.Getenv("RWECC_DISCORD_HOOK")
+	mapsAPIKey := os.Getenv("GOOGLE_MAPS_API_KEY") // Load the new API key
 	stateFilename := "sent_rwecc_incidents.json"
 
 	if apiURL == "" || webhookURL == "" {
@@ -158,14 +181,7 @@ func main() {
 		if strings.Contains(incident.Problem, "MVC") && !sentIncidents[incidentKey] {
 			log.Printf("Found new MVC at %s. Sending to Discord.", incident.Address)
 
-			// --- TIMEZONE CONVERSION ---
-			loc, err := time.LoadLocation("America/New_York")
-			if err != nil {
-				log.Printf("Error loading location for timezone conversion: %s", err)
-				continue
-			}
-
-			// The timestamp from this API has a space, not a 'T'
+			loc, _ := time.LoadLocation("America/New_York")
 			parsedTime, err := time.Parse("2006-01-02 15:04:05.000", incident.Timestamp)
 			if err != nil {
 				log.Printf("Error parsing timestamp for incident, using current time. Error: %v", err)
@@ -173,7 +189,7 @@ func main() {
 			}
 			easternTime := parsedTime.In(loc)
 
-			sendToDiscord(webhookURL, incident, easternTime)
+			sendToDiscord(webhookURL, incident, easternTime, mapsAPIKey)
 
 			sentIncidents[incidentKey] = true
 			newAlertsSent++
